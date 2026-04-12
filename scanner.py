@@ -1,31 +1,55 @@
 """
-Bridge Security Scanner - Main Engine
-This module analyzes Solidity smart contracts for security vulnerabilities
+Bridge Security Scanner - Main Engine (Multi-Language Support)
+This module analyzes smart contracts and code for security vulnerabilities
 """
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Tuple
+import sys
+import os
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from utils.language_detector import LanguageDetector
+from utils.multi_language_scanner import MultiLanguageScanner
 from data.vulnerability_patterns import ALL_PATTERNS, SEVERITY_WEIGHTS
 
 
 class VulnerabilityScanner:
     """
-    Main scanner class that analyzes smart contracts for vulnerabilities
+    Main scanner class that analyzes code for vulnerabilities
+    Now supports: Solidity, C, Java, Python
     """
     
     def __init__(self):
         self.patterns = ALL_PATTERNS
         self.findings = []
+        self.multi_scanner = MultiLanguageScanner()
+        self.language_detector = LanguageDetector()
         
     def scan_contract(self, contract_code: str) -> Dict:
         """
-        Main function to scan a smart contract
+        Main function to scan code (any supported language)
         
         Args:
-            contract_code (str): The Solidity source code to analyze
+            contract_code (str): The source code to analyze
             
         Returns:
             Dict: Contains vulnerabilities found, risk score, and summary
+        """
+        # Use multi-language scanner
+        results = self.multi_scanner.scan_code(contract_code)
+        
+        # If unknown language, try legacy Solidity-only scan
+        if results.get("language") == "unknown":
+            return self._legacy_solidity_scan(contract_code)
+        
+        return results
+    
+    def _legacy_solidity_scan(self, contract_code: str) -> Dict:
+        """
+        Legacy Solidity-only scanning (backwards compatibility)
         """
         self.findings = []
         
@@ -44,6 +68,13 @@ class VulnerabilityScanner:
         summary = self._generate_summary()
         
         return {
+            "language": "solidity",
+            "language_info": {
+                "name": "Solidity",
+                "description": "Smart contract language for Ethereum",
+                "file_extension": ".sol",
+                "icon": "⛓️"
+            },
             "vulnerabilities": self.findings,
             "risk_score": risk_score,
             "risk_level": self._get_risk_level(risk_score),
@@ -59,6 +90,8 @@ class VulnerabilityScanner:
         code = re.sub(r'//.*', '', code)
         # Remove multi-line comments
         code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
+        # Remove Python comments
+        code = re.sub(r'#.*', '', code)
         return code
     
     def _scan_category(self, code: str, category_name: str, category_patterns: Dict) -> List[Dict]:
@@ -110,12 +143,6 @@ class VulnerabilityScanner:
     def _calculate_risk_score(self) -> int:
         """
         Calculate overall risk score based on found vulnerabilities
-        
-        Score ranges:
-        - 0-20: Low Risk
-        - 21-50: Medium Risk
-        - 51-80: High Risk
-        - 81+: Critical Risk
         """
         total_score = 0
         
@@ -173,7 +200,14 @@ def format_report(scan_results: Dict) -> str:
     """
     report = []
     report.append("=" * 70)
-    report.append("BRIDGE SECURITY SCANNER - VULNERABILITY REPORT")
+    
+    # Language info
+    lang_info = scan_results.get("language_info", {})
+    lang_name = lang_info.get("name", "Unknown")
+    lang_icon = lang_info.get("icon", "")
+    
+    report.append(f"SECURITY SCANNER - VULNERABILITY REPORT")
+    report.append(f"Language: {lang_icon} {lang_name}")
     report.append("=" * 70)
     report.append("")
     
@@ -192,10 +226,11 @@ def format_report(scan_results: Dict) -> str:
     report.append("")
     
     # Summary by Category
-    report.append("ISSUES BY CATEGORY:")
-    for category, count in scan_results["summary"]["by_category"].items():
-        report.append(f"  {category}: {count}")
-    report.append("")
+    if scan_results["summary"]["by_category"]:
+        report.append("ISSUES BY CATEGORY:")
+        for category, count in scan_results["summary"]["by_category"].items():
+            report.append(f"  {category}: {count}")
+        report.append("")
     
     # Detailed Findings
     if scan_results["vulnerabilities"]:
@@ -222,9 +257,18 @@ def format_report(scan_results: Dict) -> str:
     return '\n'.join(report)
 
 
-# Test code - you can run this file directly to test
+# Example usage
 if __name__ == "__main__":
-    test_contract = """
+    # Test with multiple languages
+    
+    print("\n" + "="*70)
+    print("TESTING MULTI-LANGUAGE SCANNER")
+    print("="*70 + "\n")
+    
+    # Test 1: Solidity
+    print("TEST 1: Solidity Code")
+    print("-" * 70)
+    solidity_code = """
     pragma solidity ^0.6.0;
     
     contract VulnerableBridge {
@@ -242,5 +286,68 @@ if __name__ == "__main__":
     """
     
     scanner = VulnerabilityScanner()
-    results = scanner.scan_contract(test_contract)
+    results = scanner.scan_contract(solidity_code)
+    print(format_report(results))
+    print("\n")
+    
+    # Test 2: C Code
+    print("TEST 2: C Code")
+    print("-" * 70)
+    c_code = """
+    #include <stdio.h>
+    #include <string.h>
+    
+    int main() {
+        char buffer[10];
+        gets(buffer);
+        strcpy(buffer, "Hello");
+        printf(buffer);
+        return 0;
+    }
+    """
+    
+    results = scanner.scan_contract(c_code)
+    print(format_report(results))
+    print("\n")
+    
+    # Test 3: Python Code
+    print("TEST 3: Python Code")
+    print("-" * 70)
+    python_code = """
+    import pickle
+    import os
+    
+    password = "admin123"
+    
+    def unsafe_function(user_input):
+        eval(user_input)
+        data = pickle.loads(user_input)
+        os.system("ls " + user_input)
+    """
+    
+    results = scanner.scan_contract(python_code)
+    print(format_report(results))
+    print("\n")
+    
+    # Test 4: Java Code
+    print("TEST 4: Java Code")
+    print("-" * 70)
+    java_code = """
+    import java.sql.*;
+    import java.security.MessageDigest;
+    
+    public class Vulnerable {
+        String password = "secret123";
+        
+        public void queryDatabase(String userInput) throws Exception {
+            Statement stmt = connection.createStatement();
+            String query = "SELECT * FROM users WHERE name = '" + userInput + "'";
+            stmt.executeQuery(query);
+            
+            MessageDigest md = MessageDigest.getInstance("MD5");
+        }
+    }
+    """
+    
+    results = scanner.scan_contract(java_code)
     print(format_report(results))
