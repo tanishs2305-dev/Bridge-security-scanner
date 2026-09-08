@@ -1,252 +1,128 @@
 """
-Bridge Security Scanner - Web Interface (Multi-Language Support)
-Streamlit app for analyzing code in multiple languages
+Bridge Security Scanner - Web Interface
+Streamlit app for analyzing cross-chain bridge security,
+covering both on-chain (Solidity) and off-chain (relayer/validator) code.
 """
 
 import streamlit as st
-from scanner import VulnerabilityScanner, format_report
+from scanner import VulnerabilityScanner, OffchainScanner, format_report
 
-# Page configuration
+# -------------------- PAGE CONFIG --------------------
 st.set_page_config(
     page_title="Bridge Security Scanner",
     page_icon="🔒",
     layout="wide"
 )
 
-# Initialize session state
-if 'code_input' not in st.session_state:
-    st.session_state['code_input'] = """// Paste your code here
-// Supported languages: Solidity, C, Java, Python
-
+# -------------------- SESSION STATE INIT --------------------
+if "code_input" not in st.session_state:
+    st.session_state["code_input"] = """// Paste your Solidity contract here
 pragma solidity ^0.8.0;
 
-contract Example {
+contract MyBridge {
     // Your code here
 }
 """
 
-# Title and description
-st.title(" Bridge Security Scanner")
+if "results" not in st.session_state:
+    st.session_state["results"] = None
+
+# -------------------- TITLE --------------------
+st.title("🔒 Bridge Security Scanner")
+
 st.markdown("""
-Analyze code for security vulnerabilities in **Solidity, C, Java, and Python**.
-Detects vulnerabilities that have caused **$1.92B in losses** in blockchain,
-plus common security issues in other languages.
+Analyze cross-chain bridge security across **both halves of the stack**: on-chain Solidity
+contracts and the off-chain relayer/validator services that support them.
+This tool detects vulnerability categories that have caused **$1.92B in losses**.
 """)
 
-# Sidebar with information
+# -------------------- MODE SELECTOR --------------------
+scan_mode = st.radio(
+    "Scan mode:",
+    ["On-Chain (Solidity)", "Off-Chain (Relayer / Validator — Python, Go)"],
+    horizontal=True
+)
+is_offchain = scan_mode.startswith("Off-Chain")
+
+# -------------------- SIDEBAR --------------------
 with st.sidebar:
-    st.header("Supported Languages")
-    st.info("""
-    **⛓️ Solidity** - Smart contracts
-    - Reentrancy attacks
-    - Replay attacks
-    - Bridge vulnerabilities
+    st.header("About")
 
-    **⚙️ C** - Systems programming
-    - Buffer overflows
-    - Memory leaks
-    - Format string bugs
+    if is_offchain:
+        st.info("""
+        **Off-Chain Vulnerability Categories:**
+        - 🔑 Key & Secret Exposure
+        - ✍️ Signature & Threshold Validation
+        - 🌐 Network & Service Exposure
+        - ⚙️ Unsafe Execution
+        """)
 
-    **☕ Java** - Enterprise apps
-    - SQL injection
-    - Deserialization
-    - Crypto issues
+        st.header("Example Scripts")
+        if st.button("Load Vulnerable Relayer Example", use_container_width=True):
+            with open("examples/offchain/vulnerable_relayer.py", "r") as f:
+                st.session_state["code_input"] = f.read()
+    else:
+        st.info("""
+        **On-Chain Vulnerability Categories:**
+        - 🚨 Verification Bypass
+        - ⚠️ Asymmetric Processing
+        - 🔑 Key Theft
+        - 💥 Diverse Exploits
+        """)
 
-    **🐍 Python** - General purpose
-    - Code injection
-    - Unsafe deserialization
-    - Hardcoded secrets
-    """)
+        st.header("Example Contracts")
 
-    st.header("Load Example Code")
+        if st.button("Load Vulnerable Example", use_container_width=True):
+            with open("examples/vulnerable_bridge.sol", "r") as f:
+                st.session_state["code_input"] = f.read()
 
-    # Language selector
-    lang_choice = st.radio(
-        "Choose Language:",
-        ["Solidity", "C", "Java", "Python"],
-        key="lang_radio"
-    )
+        if st.button("Load Secure Example", use_container_width=True):
+            with open("examples/secure_bridge.sol", "r") as f:
+                st.session_state["code_input"] = f.read()
 
-    # Example selector
-    example_choice = st.radio(
-        "Choose Example:",
-        ["Vulnerable", "Secure"],
-        key="example_radio"
-    )
-
-    # Load button
-    if st.button(" Load Example", use_container_width=True, type="primary"):
-
-        # Solidity examples
-        if lang_choice == "Solidity":
-            if example_choice == "Vulnerable":
-                st.session_state['code_input'] = """pragma solidity ^0.6.0;
-
-contract VulnerableBridge {
-    mapping(address => uint256) public balances;
-
-    function deposit() public payable {
-        balances[msg.sender] += msg.value;
-    }
-
-    function withdraw(uint256 amount) public {
-        msg.sender.call{value: amount}("");
-        balances[msg.sender] -= amount;
-    }
-}"""
-            else:
-                st.session_state['code_input'] = """pragma solidity ^0.8.0;
-
-contract SecureBridge {
-    mapping(address => uint256) public balances;
-    mapping(uint256 => bool) public processedNonces;
-    uint256 public nonce;
-
-    function withdraw(uint256 amount, uint256 _nonce) public {
-        require(!processedNonces[_nonce], "Already processed");
-        require(balances[msg.sender] >= amount, "Insufficient");
-
-        processedNonces[_nonce] = true;
-        balances[msg.sender] -= amount;
-
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
-        require(success, "Transfer failed");
-    }
-}"""
-
-        # C examples
-        elif lang_choice == "C":
-            if example_choice == "Vulnerable":
-                st.session_state['code_input'] = """#include 
-#include 
-
-int main() {
-    char buffer[10];
-    char password[] = "admin123";
-
-    gets(buffer);
-    strcpy(buffer, "Hello World!");
-    sprintf(buffer, "User: %s", buffer);
-    printf(buffer);
-
-    return 0;
-}"""
-            else:
-                st.session_state['code_input'] = """#include 
-#include 
-
-int main() {
-    char buffer[100];
-
-    if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
-        snprintf(buffer, sizeof(buffer), "User: %s", buffer);
-        printf("%s", buffer);
-    }
-
-    return 0;
-}"""
-
-        # Java examples
-        elif lang_choice == "Java":
-            if example_choice == "Vulnerable":
-                st.session_state['code_input'] = """import java.sql.*;
-import java.security.MessageDigest;
-
-public class Vulnerable {
-    String password = "secret123";
-
-    public void query(String user) throws Exception {
-        Statement stmt = conn.createStatement();
-        String sql = "SELECT * FROM users WHERE name = '" + user + "'";
-        stmt.executeQuery(sql);
-
-        MessageDigest md = MessageDigest.getInstance("MD5");
-    }
-}"""
-            else:
-                st.session_state['code_input'] = """import java.sql.*;
-import java.security.MessageDigest;
-
-public class Secure {
-    public void query(String user) throws Exception {
-        String sql = "SELECT * FROM users WHERE name = ?";
-        PreparedStatement pstmt = conn.prepareStatement(sql);
-        pstmt.setString(1, user);
-        pstmt.executeQuery();
-
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-    }
-}"""
-
-        # Python examples
-        else:
-            if example_choice == "Vulnerable":
-                st.session_state['code_input'] = """import pickle
-import os
-
-password = "admin123"
-api_key = "sk-1234567890"
-
-def unsafe(user_input):
-    eval(user_input)
-    data = pickle.loads(user_input)
-    os.system("ls " + user_input)
-
-    query = f"SELECT * FROM users WHERE name = '{user_input}'"
-"""
-            else:
-                st.session_state['code_input'] = """import json
-import subprocess
-import hashlib
-
-def safe(user_input):
-    data = json.loads(user_input)
-    subprocess.run(["ls", user_input], check=True)
-
-    hashed = hashlib.sha256(user_input.encode()).hexdigest()
-"""
-
-        st.success(f"✅ Loaded {example_choice} {lang_choice} example!")
-
-# Main content area
+# -------------------- MAIN CONTENT --------------------
 col1, col2 = st.columns([1, 1])
 
+# -------------------- LEFT COLUMN (CODE INPUT) --------------------
 with col1:
-    st.subheader("📝 Source Code")
+    label = "📝 Relayer / Validator Code" if is_offchain else "📝 Smart Contract Code"
+    st.subheader(label)
 
-    # Code input - directly bound to session state
+    placeholder = "Paste relayer/validator source (Python or Go):" if is_offchain else "Paste Solidity contract code:"
     contract_code = st.text_area(
-        "Paste source code:",
+        placeholder,
         height=400,
         key="code_input"
     )
 
-    # Scan button
-    if st.button("🔍 Scan for Vulnerabilities", type="primary", use_container_width=True):
-        if contract_code.strip():
-            with st.spinner("Analyzing code..."):
-                scanner = VulnerabilityScanner()
-                results = st.session_state['results'] = scanner.scan_contract(contract_code)
-                st.success("Scan complete!")
-        else:
-            st.warning("Please enter code first!")
+    # Cap input size to avoid pathological regex scan times on huge pastes
+    MAX_CHARS = 100_000
 
+    if st.button("🔍 Scan for Vulnerabilities", type="primary", use_container_width=True):
+        if not contract_code.strip():
+            st.warning("Please enter code first!")
+        elif len(contract_code) > MAX_CHARS:
+            st.error(f"Input too large ({len(contract_code):,} chars). Limit is {MAX_CHARS:,} chars.")
+        else:
+            with st.spinner("Analyzing code..."):
+                scanner = OffchainScanner() if is_offchain else VulnerabilityScanner()
+                st.session_state["results"] = scanner.scan_contract(contract_code)
+            st.success("Scan complete!")
+
+# -------------------- RIGHT COLUMN (RESULTS) --------------------
 with col2:
     st.subheader("📊 Scan Results")
 
-    if 'results' in st.session_state:
-        results = st.session_state['results']
+    if st.session_state["results"] is not None:
+        results = st.session_state["results"]
 
-        # Show detected language
         lang_info = results.get("language_info", {})
         if lang_info:
-            st.info(f"{lang_info.get('icon', '')} **Detected Language:** {lang_info.get('name', 'Unknown')}")
+            st.info(f"{lang_info.get('icon', '')} **Scope:** {lang_info.get('name', 'Unknown')}")
 
-        # Risk score display
-        risk_score = results['risk_score']
-        risk_level = results['risk_level']
+        risk_score = results["risk_score"]
+        risk_level = results["risk_level"]
 
-        # Color based on risk level
         if risk_level == "CRITICAL":
             color = "🔴"
         elif risk_level == "HIGH":
@@ -256,7 +132,6 @@ with col2:
         else:
             color = "🟢"
 
-        # Display metrics
         metric_col1, metric_col2, metric_col3 = st.columns(3)
 
         with metric_col1:
@@ -266,79 +141,57 @@ with col2:
             st.metric("Risk Level", f"{color} {risk_level}")
 
         with metric_col3:
-            st.metric("Total Issues", results['total_issues'])
+            st.metric("Total Issues", results["total_issues"])
 
-        # Severity breakdown
         st.markdown("### Issues by Severity")
-        severity_cols = st.columns(4)
 
+        severity_cols = st.columns(4)
         severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
         colors = ["🔴", "🟠", "🟡", "🟢"]
 
-        for col, sev, color_icon in zip(severity_cols, severities, colors):
-            count = results['summary']['by_severity'][sev]
-            col.metric(f"{color_icon} {sev}", count)
+        for col, sev, colr in zip(severity_cols, severities, colors):
+            count = results["summary"]["by_severity"][sev]
+            col.metric(f"{colr} {sev}", count)
 
-        # Category breakdown
-        if results['summary']['by_category']:
+        if results["summary"]["by_category"]:
             st.markdown("### Issues by Category")
-            for category, count in results['summary']['by_category'].items():
+            for category, count in results["summary"]["by_category"].items():
                 st.write(f"**{category}:** {count} issue(s)")
 
-        # Detailed findings
         st.markdown("### 🔍 Detailed Findings")
 
-        if results['vulnerabilities']:
-            for i, vuln in enumerate(results['vulnerabilities'], 1):
-                with st.expander(f"[{i}] {vuln['vulnerability']} - {vuln['severity']}", expanded=(i==1)):
+        if results["vulnerabilities"]:
+            for i, vuln in enumerate(results["vulnerabilities"], 1):
+                with st.expander(
+                    f"[{i}] {vuln['vulnerability']} - {vuln['severity']}",
+                    expanded=(i == 1)
+                ):
                     st.markdown(f"**Category:** {vuln['category']}")
                     st.markdown(f"**Line:** {vuln['line_number']}")
                     st.markdown(f"**Description:** {vuln['description']}")
                     st.markdown(f"**Explanation:** {vuln['explanation']}")
-
-                    lang = results.get('language', 'text')
-                    if lang == 'solidity':
-                        code_lang = 'solidity'
-                    elif lang == 'c':
-                        code_lang = 'c'
-                    elif lang == 'java':
-                        code_lang = 'java'
-                    elif lang == 'python':
-                        code_lang = 'python'
-                    else:
-                        code_lang = 'text'
-
-                    st.code(vuln['code_snippet'], language=code_lang)
+                    st.code(vuln["code_snippet"], language="python" if is_offchain else "solidity")
         else:
             st.success("✅ No vulnerabilities detected!")
 
-        # Download report
         st.markdown("### 📥 Download Report")
         report_text = format_report(results)
+
         st.download_button(
             label="Download Text Report",
             data=report_text,
             file_name="vulnerability_report.txt",
             mime="text/plain"
         )
+
     else:
         st.info("👈 Enter code and click 'Scan' to see results")
 
-# Footer
+# -------------------- FOOTER --------------------
 st.markdown("---")
 st.markdown("""
-
-
-    
-
-Bridge Security Scanner - Multi-Language Support
-
-
-    
-
-🔒 Supports: Solidity, C, Java, Python
-
-
-
-
+<div style='text-align: center'>
+    <p>Built to address the $1.92B cross-chain bridge security problem</p>
+    <p>🔒 Bridge Security Scanner — On-Chain + Off-Chain Coverage</p>
+</div>
 """, unsafe_allow_html=True)

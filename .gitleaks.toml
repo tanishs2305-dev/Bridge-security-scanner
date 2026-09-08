@@ -1,0 +1,14 @@
+# Gitleaks configuration for Bridge Security Scanner
+# Extends the default gitleaks rule set, with one allowlist entry:
+# our own intentionally-vulnerable example file contains a fake private
+# key on purpose (to demonstrate detection), so it should not be flagged
+# as a real leak.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Intentional demo secrets in example/test files"
+paths = [
+  '''examples/offchain/vulnerable_relayer\.py''',
+]
