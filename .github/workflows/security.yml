@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0  # full history needed so gitleaks can scan all commits
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
