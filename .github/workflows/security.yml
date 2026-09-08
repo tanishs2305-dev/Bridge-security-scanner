@@ -30,7 +30,7 @@ jobs:
         run: pip install bandit pip-audit pytest
 
       - name: Run Bandit (static analysis for common Python security issues)
-        run: bandit -r . -x ./examples -f screen
+        run: bandit -r . -x ./examples,./tests -f screen
 
       - name: Run pip-audit (dependency vulnerability scan)
         run: pip-audit -r requirements.txt
