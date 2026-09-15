@@ -203,6 +203,61 @@ class OffchainScanner(VulnerabilityScanner):
         code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
         return code
 
+def merge_scan_results(regex_results: Dict, slither_results: Dict) -> Dict:
+    """
+    Combine findings from the regex-based scanner and Slither into one
+    unified report. Each finding gets a 'source' tag ('pattern' or
+    'slither') so the UI can badge them differently if desired.
+    """
+    combined_findings = []
+
+    for f in regex_results.get("vulnerabilities", []):
+        f = dict(f)
+        f.setdefault("source", "pattern")
+        combined_findings.append(f)
+
+    for f in slither_results.get("vulnerabilities", []):
+        f = dict(f)
+        f.setdefault("source", "slither")
+        combined_findings.append(f)
+
+    severity_weights = {"CRITICAL": 10, "HIGH": 7, "MEDIUM": 4, "LOW": 2}
+    total_score = sum(severity_weights.get(f["severity"], 0) for f in combined_findings)
+    risk_score = min(total_score, 100)
+
+    if risk_score >= 81:
+        risk_level = "CRITICAL"
+    elif risk_score >= 51:
+        risk_level = "HIGH"
+    elif risk_score >= 21:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+
+    summary = {
+        "by_category": {},
+        "by_severity": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    }
+    for f in combined_findings:
+        summary["by_category"][f["category"]] = summary["by_category"].get(f["category"], 0) + 1
+        summary["by_severity"][f["severity"]] += 1
+
+    return {
+        "language": "solidity",
+        "language_info": {
+            "name": "Solidity (Pattern + Slither)",
+            "description": "Combined bridge-specific pattern matching and Slither AST analysis",
+            "file_extension": ".sol",
+            "icon": "⛓️"
+        },
+        "vulnerabilities": combined_findings,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "summary": summary,
+        "total_issues": len(combined_findings),
+        "engine_error": slither_results.get("engine_error")
+    }    
+
 
 def format_report(scan_results: Dict) -> str:
     """

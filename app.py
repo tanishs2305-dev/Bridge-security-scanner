@@ -5,7 +5,8 @@ covering both on-chain (Solidity) and off-chain (relayer/validator) code.
 """
 
 import streamlit as st
-from scanner import VulnerabilityScanner, OffchainScanner, format_report
+from scanner import VulnerabilityScanner, OffchainScanner, merge_scan_results, format_report
+from utils.slither_integration import scan_with_slither, SlitherUnavailableError
 
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(
@@ -104,10 +105,18 @@ with col1:
         elif len(contract_code) > MAX_CHARS:
             st.error(f"Input too large ({len(contract_code):,} chars). Limit is {MAX_CHARS:,} chars.")
         else:
-            with st.spinner("Analyzing code..."):
-                scanner = OffchainScanner() if is_offchain else VulnerabilityScanner()
-                st.session_state["results"] = scanner.scan_contract(contract_code)
-            st.success("Scan complete!")
+                with st.spinner("Analyzing code..."):
+                    if is_offchain:
+                        st.session_state["results"] = OffchainScanner().scan_contract(contract_code)
+                    else:
+                        regex_result = VulnerabilityScanner().scan_contract(contract_code)
+                        try:
+                            slither_result = scan_with_slither(contract_code)
+                            st.session_state["results"] = merge_scan_results(regex_result, slither_result)
+                        except SlitherUnavailableError:
+                            regex_result["engine_error"] = "Slither not installed — showing pattern-based results only."
+                            st.session_state["results"] = regex_result
+                st.success("Scan complete!")
 
 # -------------------- RIGHT COLUMN (RESULTS) --------------------
 with col2:
