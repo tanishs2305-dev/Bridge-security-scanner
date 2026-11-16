@@ -15,11 +15,13 @@ identically.
 """
 
 import json
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never shell=True
 import tempfile
 import os
 import re
 from typing import Dict, List, Optional
+
+from data.remediation import get_remediation
 
 # Maps Slither's impact levels to this project's severity vocabulary
 IMPACT_TO_SEVERITY = {
@@ -42,7 +44,7 @@ class SlitherUnavailableError(Exception):
 
 def _check_slither_available() -> bool:
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B603 B607 - fixed args, no shell
             ["slither", "--version"],
             capture_output=True, timeout=10, check=False
         )
@@ -75,11 +77,11 @@ def _ensure_solc_version(version: str) -> None:
     report a compilation error if that's incompatible.
     """
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B603 B607 - fixed args, no shell
             ["solc-select", "install", version],
             capture_output=True, timeout=60, check=False
         )
-        subprocess.run(
+        subprocess.run(  # nosec B603 B607 - fixed args, no shell
             ["solc-select", "use", version],
             capture_output=True, timeout=10, check=False
         )
@@ -118,7 +120,7 @@ def scan_with_slither(contract_code: str) -> Dict:
         json_output_path = os.path.join(tmpdir, "slither_output.json")
 
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 B607 - fixed args, no shell
                 ["slither", contract_path, "--json", json_output_path],
                 capture_output=True,
                 text=True,
@@ -157,6 +159,8 @@ def scan_with_slither(contract_code: str) -> Dict:
                         "explanation": description,
                         "line_number": line_number if line_number else 0,
                         "code_snippet": description,
+                        "remediation": get_remediation(check_name, "slither"),
+                        "detector": check_name,
                         "source": "slither"
                     })
 

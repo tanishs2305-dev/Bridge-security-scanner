@@ -1,206 +1,255 @@
 """
 Bridge Security Scanner - Web Interface
-Streamlit app for analyzing cross-chain bridge security,
-covering both on-chain (Solidity) and off-chain (relayer/validator) code.
+Streamlit app for analyzing cross-chain bridge security, covering both on-chain
+(Solidity) and off-chain (relayer/validator) code, with an incident taxonomy and a
+live benchmark.
 """
+
+from pathlib import Path
 
 import streamlit as st
+
 from scanner import VulnerabilityScanner, OffchainScanner, merge_scan_results, format_report
 from utils.slither_integration import scan_with_slither, SlitherUnavailableError
+from data.incidents import INCIDENTS, CATEGORIES, coverage_summary
+from evaluation.evaluate import run_evaluation
+
+BASE_DIR = Path(__file__).resolve().parent
+MAX_CHARS = 100_000
+
+ONCHAIN_EXAMPLES = {
+    "Vulnerable bridge": "examples/vulnerable_bridge.sol",
+    "Secure bridge": "examples/secure_bridge.sol",
+    "Ronin-style (vulnerable)": "examples/ronin_style_vulnerable.sol",
+    "Ronin-style (secure)": "examples/ronin_style_secure.sol",
+}
+OFFCHAIN_EXAMPLES = {
+    "Vulnerable relayer": "examples/offchain/vulnerable_relayer.py",
+    "Secure relayer": "examples/offchain/secure_relayer.py",
+}
+SEVERITY_ICON = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}
+SOURCE_BADGE = {"pattern": "🧩 pattern engine", "slither": "🔬 Slither"}
+
+
+def read_example(relative_path: str) -> str:
+    return (BASE_DIR / relative_path).read_text(encoding="utf-8")
+
 
 # -------------------- PAGE CONFIG --------------------
-st.set_page_config(
-    page_title="Bridge Security Scanner",
-    page_icon="🔒",
-    layout="wide"
-)
+st.set_page_config(page_title="Bridge Security Scanner", page_icon="🔒", layout="wide")
 
-# -------------------- SESSION STATE INIT --------------------
 if "code_input" not in st.session_state:
-    st.session_state["code_input"] = """// Paste your Solidity contract here
-pragma solidity ^0.8.0;
-
-contract MyBridge {
-    // Your code here
-}
-"""
-
+    st.session_state["code_input"] = (
+        "// Paste your Solidity contract here\npragma solidity ^0.8.0;\n\ncontract MyBridge {\n    // Your code here\n}\n"
+    )
 if "results" not in st.session_state:
     st.session_state["results"] = None
 
-# -------------------- TITLE --------------------
+# -------------------- HEADER --------------------
 st.title("🔒 Bridge Security Scanner")
-
-st.markdown("""
-Analyze cross-chain bridge security across **both halves of the stack**: on-chain Solidity
-contracts and the off-chain relayer/validator services that support them.
-This tool detects vulnerability categories that have caused **$1.92B in losses**.
-""")
-
-# -------------------- MODE SELECTOR --------------------
-scan_mode = st.radio(
-    "Scan mode:",
-    ["On-Chain (Solidity)", "Off-Chain (Relayer / Validator — Python, Go)"],
-    horizontal=True
+st.markdown(
+    "Analyze cross-chain bridge security across **both halves of the stack**: on-chain Solidity "
+    "contracts and the off-chain relayer/validator services that support them. "
+    "Detects vulnerability classes behind **$1.92B** in bridge losses."
 )
-is_offchain = scan_mode.startswith("Off-Chain")
 
-# -------------------- SIDEBAR --------------------
-with st.sidebar:
-    st.header("About")
+tab_scan, tab_taxonomy, tab_eval = st.tabs(["🔍 Scanner", "📚 Incident Taxonomy", "📊 Evaluation"])
 
-    if is_offchain:
-        st.info("""
-        **Off-Chain Vulnerability Categories:**
-        - 🔑 Key & Secret Exposure
-        - ✍️ Signature & Threshold Validation
-        - 🌐 Network & Service Exposure
-        - ⚙️ Unsafe Execution
-        """)
-
-        st.header("Example Scripts")
-        if st.button("Load Vulnerable Relayer Example", use_container_width=True):
-            with open("examples/offchain/vulnerable_relayer.py", "r") as f:
-                st.session_state["code_input"] = f.read()
-    else:
-        st.info("""
-        **On-Chain Vulnerability Categories:**
-        - 🚨 Verification Bypass
-        - ⚠️ Asymmetric Processing
-        - 🔑 Key Theft
-        - 💥 Diverse Exploits
-        """)
-
-        st.header("Example Contracts")
-
-        if st.button("Load Vulnerable Example", use_container_width=True):
-            with open("examples/vulnerable_bridge.sol", "r") as f:
-                st.session_state["code_input"] = f.read()
-
-        if st.button("Load Secure Example", use_container_width=True):
-            with open("examples/secure_bridge.sol", "r") as f:
-                st.session_state["code_input"] = f.read()
-
-# -------------------- MAIN CONTENT --------------------
-col1, col2 = st.columns([1, 1])
-
-# -------------------- LEFT COLUMN (CODE INPUT) --------------------
-with col1:
-    label = "📝 Relayer / Validator Code" if is_offchain else "📝 Smart Contract Code"
-    st.subheader(label)
-
-    placeholder = "Paste relayer/validator source (Python or Go):" if is_offchain else "Paste Solidity contract code:"
-    contract_code = st.text_area(
-        placeholder,
-        height=400,
-        key="code_input"
+# ======================================================================
+# TAB 1 - SCANNER
+# ======================================================================
+with tab_scan:
+    scan_mode = st.radio(
+        "Scan mode:",
+        ["On-Chain (Solidity)", "Off-Chain (Relayer / Validator — Python, Go)"],
+        horizontal=True,
     )
+    is_offchain = scan_mode.startswith("Off-Chain")
 
-    # Cap input size to avoid pathological regex scan times on huge pastes
-    MAX_CHARS = 100_000
-
-    if st.button("🔍 Scan for Vulnerabilities", type="primary", use_container_width=True):
-        if not contract_code.strip():
-            st.warning("Please enter code first!")
-        elif len(contract_code) > MAX_CHARS:
-            st.error(f"Input too large ({len(contract_code):,} chars). Limit is {MAX_CHARS:,} chars.")
+    with st.sidebar:
+        st.header("About")
+        if is_offchain:
+            st.info(
+                "**Off-chain categories**\n\n"
+                "- 🔑 Key & Secret Exposure\n- ✍️ Signature & Threshold Validation\n"
+                "- 🌐 Network & Service Exposure\n- ⚙️ Unsafe Execution"
+            )
+            examples = OFFCHAIN_EXAMPLES
         else:
+            st.info(
+                "**On-chain categories**\n\n"
+                "- 🚨 Verification Bypass\n- ⚠️ Asymmetric Processing\n"
+                "- 🔑 Key Theft\n- 💥 Diverse Exploits"
+            )
+            examples = ONCHAIN_EXAMPLES
+
+        st.header("Examples")
+        chosen = st.selectbox("Choose an example", list(examples.keys()))
+        if st.button("Load example", width="stretch"):
+            st.session_state["code_input"] = read_example(examples[chosen])
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.subheader("📝 Relayer / Validator Code" if is_offchain else "📝 Smart Contract Code")
+        contract_code = st.text_area(
+            "Paste relayer/validator source (Python or Go):" if is_offchain else "Paste Solidity contract code:",
+            height=420,
+            key="code_input",
+        )
+
+        if st.button("🔍 Scan for Vulnerabilities", type="primary", width="stretch"):
+            if not contract_code.strip():
+                st.warning("Please enter code first!")
+            elif len(contract_code) > MAX_CHARS:
+                st.error(f"Input too large ({len(contract_code):,} chars). Limit is {MAX_CHARS:,} chars.")
+            else:
                 with st.spinner("Analyzing code..."):
                     if is_offchain:
                         st.session_state["results"] = OffchainScanner().scan_contract(contract_code)
                     else:
-                        regex_result = VulnerabilityScanner().scan_contract(contract_code)
+                        pattern_result = VulnerabilityScanner().scan_contract(contract_code)
                         try:
                             slither_result = scan_with_slither(contract_code)
-                            st.session_state["results"] = merge_scan_results(regex_result, slither_result)
+                            st.session_state["results"] = merge_scan_results(pattern_result, slither_result)
                         except SlitherUnavailableError:
-                            regex_result["engine_error"] = "Slither not installed — showing pattern-based results only."
-                            st.session_state["results"] = regex_result
+                            pattern_result["engine_error"] = (
+                                "Slither is not installed - showing pattern-engine results only."
+                            )
+                            st.session_state["results"] = pattern_result
                 st.success("Scan complete!")
 
-# -------------------- RIGHT COLUMN (RESULTS) --------------------
-with col2:
-    st.subheader("📊 Scan Results")
-
-    if st.session_state["results"] is not None:
+    with col2:
+        st.subheader("📊 Scan Results")
         results = st.session_state["results"]
 
-        lang_info = results.get("language_info", {})
-        if lang_info:
-            st.info(f"{lang_info.get('icon', '')} **Scope:** {lang_info.get('name', 'Unknown')}")
-
-        risk_score = results["risk_score"]
-        risk_level = results["risk_level"]
-
-        if risk_level == "CRITICAL":
-            color = "🔴"
-        elif risk_level == "HIGH":
-            color = "🟠"
-        elif risk_level == "MEDIUM":
-            color = "🟡"
+        if results is None:
+            st.info("👈 Enter code and click 'Scan' to see results")
         else:
-            color = "🟢"
+            lang_info = results.get("language_info", {})
+            if lang_info:
+                st.info(f"{lang_info.get('icon', '')} **Scope:** {lang_info.get('name', 'Unknown')}")
+            if results.get("engine_error"):
+                st.warning(results["engine_error"])
 
-        metric_col1, metric_col2, metric_col3 = st.columns(3)
+            level = results["risk_level"]
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Risk Score", f"{results['risk_score']}/100")
+            m2.metric("Risk Level", f"{SEVERITY_ICON.get(level, '')} {level}")
+            m3.metric("Total Issues", results["total_issues"])
+            st.progress(min(results["risk_score"], 100) / 100)
 
-        with metric_col1:
-            st.metric("Risk Score", f"{risk_score}/100")
+            st.markdown("### Issues by Severity")
+            sev_cols = st.columns(4)
+            for col, sev in zip(sev_cols, ["CRITICAL", "HIGH", "MEDIUM", "LOW"]):
+                col.metric(f"{SEVERITY_ICON[sev]} {sev}", results["summary"]["by_severity"][sev])
 
-        with metric_col2:
-            st.metric("Risk Level", f"{color} {risk_level}")
+            if results["summary"]["by_category"]:
+                st.markdown("### Issues by Category")
+                for category, count in results["summary"]["by_category"].items():
+                    st.write(f"**{category}:** {count} issue(s)")
 
-        with metric_col3:
-            st.metric("Total Issues", results["total_issues"])
+            st.markdown("### 🔍 Detailed Findings")
+            if results["vulnerabilities"]:
+                for i, vuln in enumerate(results["vulnerabilities"], 1):
+                    header = f"[{i}] {SEVERITY_ICON.get(vuln['severity'], '')} {vuln['vulnerability']} - {vuln['severity']}"
+                    with st.expander(header, expanded=(i == 1)):
+                        st.markdown(f"**Category:** {vuln['category']}  |  **Line:** {vuln['line_number']}")
+                        badge = SOURCE_BADGE.get(vuln.get("source", "pattern"), "pattern engine")
+                        if vuln.get("confirmed_by") == "slither":
+                            badge += " + 🔬 Slither (confirmed by both engines)"
+                        st.markdown(f"**Detected by:** {badge}")
+                        st.markdown(f"**Description:** {vuln['description']}")
+                        st.markdown(f"**Why it matters:** {vuln['explanation']}")
+                        if vuln.get("remediation"):
+                            st.success(f"**How to fix:** {vuln['remediation']}")
+                        st.code(vuln["code_snippet"], language="python" if is_offchain else "solidity")
+            else:
+                st.success("✅ No vulnerabilities detected!")
 
-        st.markdown("### Issues by Severity")
+            st.markdown("### 📥 Download Report")
+            st.download_button(
+                label="Download Text Report",
+                data=format_report(results),
+                file_name="vulnerability_report.txt",
+                mime="text/plain",
+            )
 
-        severity_cols = st.columns(4)
-        severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
-        colors = ["🔴", "🟠", "🟡", "🟢"]
+# ======================================================================
+# TAB 2 - INCIDENT TAXONOMY
+# ======================================================================
+with tab_taxonomy:
+    summary = coverage_summary()
+    st.subheader("Cross-chain bridge incident taxonomy")
+    st.caption(
+        "Each real incident is mapped to a vulnerability category and to the detectors in this tool. "
+        "Loss figures are approximate; coverage levels are deliberately conservative."
+    )
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Incidents mapped", summary["total"])
+    t2.metric("Losses covered (approx.)", f"${summary['loss_total_m'] / 1000:.2f}B")
+    t3.metric("Root cause detected", summary["by_coverage"].get("Detected", 0))
+    t4.metric("Partial / out of scope", summary["by_coverage"].get("Partial", 0) + summary["by_coverage"].get("Out of scope", 0))
 
-        for col, sev, colr in zip(severity_cols, severities, colors):
-            count = results["summary"]["by_severity"][sev]
-            col.metric(f"{colr} {sev}", count)
+    pick = st.selectbox("Filter by category", ["All"] + CATEGORIES)
+    rows = [
+        {
+            "Incident": inc["name"],
+            "Year": inc["year"],
+            "Loss ($M)": inc["loss_usd_m"],
+            "Category": inc["category"],
+            "Root cause": inc["root_cause"],
+            "Detectors": ", ".join(inc["detectors"]) or "-",
+            "Coverage": inc["coverage"],
+        }
+        for inc in INCIDENTS
+        if pick == "All" or inc["category"] == pick
+    ]
+    st.dataframe(rows, width="stretch", hide_index=True)
+    st.caption(
+        "Detected = a detector targets the root-cause pattern. Partial = the vulnerability class or adjacent "
+        "hygiene is covered, not the exact root cause (e.g. non-Solidity code, off-chain key compromise). "
+        "Out of scope = not detectable by static analysis."
+    )
 
-        if results["summary"]["by_category"]:
-            st.markdown("### Issues by Category")
-            for category, count in results["summary"]["by_category"].items():
-                st.write(f"**{category}:** {count} issue(s)")
+# ======================================================================
+# TAB 3 - EVALUATION
+# ======================================================================
+with tab_eval:
+    st.subheader("Benchmark: precision, recall and speed")
+    st.caption(
+        "Runs the pattern + function-rule engine over a labeled set of vulnerable and safe contracts. "
+        "The contracts were written by the project author, so treat this as a regression benchmark, "
+        "not an independent accuracy claim."
+    )
+    if st.button("Run benchmark", type="primary"):
+        st.session_state["benchmark"] = run_evaluation()
 
-        st.markdown("### 🔍 Detailed Findings")
-
-        if results["vulnerabilities"]:
-            for i, vuln in enumerate(results["vulnerabilities"], 1):
-                with st.expander(
-                    f"[{i}] {vuln['vulnerability']} - {vuln['severity']}",
-                    expanded=(i == 1)
-                ):
-                    st.markdown(f"**Category:** {vuln['category']}")
-                    st.markdown(f"**Line:** {vuln['line_number']}")
-                    st.markdown(f"**Description:** {vuln['description']}")
-                    st.markdown(f"**Explanation:** {vuln['explanation']}")
-                    st.code(vuln["code_snippet"], language="python" if is_offchain else "solidity")
-        else:
-            st.success("✅ No vulnerabilities detected!")
-
-        st.markdown("### 📥 Download Report")
-        report_text = format_report(results)
-
-        st.download_button(
-            label="Download Text Report",
-            data=report_text,
-            file_name="vulnerability_report.txt",
-            mime="text/plain"
+    bench = st.session_state.get("benchmark")
+    if bench:
+        b1, b2, b3, b4, b5 = st.columns(5)
+        b1.metric("Contracts", bench["contracts"])
+        b2.metric("Precision", bench["precision"])
+        b3.metric("Recall", bench["recall"])
+        b4.metric("F1", bench["f1"])
+        b5.metric("Avg scan time", f"{bench['avg_ms']} ms")
+        st.write(f"Confusion matrix: **{bench['confusion']}**  |  Expected-detector hit rate: **{bench['detector_hit_rate']}**")
+        st.dataframe(
+            [
+                {
+                    "Contract": r["contract"],
+                    "Label": r["label"],
+                    "Score": r["risk_score"],
+                    "Detectors fired": ", ".join(r["findings"]) or "-",
+                    "Correct": "✅" if r["correct"] else "❌",
+                    "ms": r["ms"],
+                }
+                for r in bench["rows"]
+            ],
+            width="stretch",
+            hide_index=True,
         )
-
-    else:
-        st.info("👈 Enter code and click 'Scan' to see results")
 
 # -------------------- FOOTER --------------------
 st.markdown("---")
-st.markdown("""
-<div style='text-align: center'>
-    <p>Built to address the $1.92B cross-chain bridge security problem</p>
-    <p>🔒 Bridge Security Scanner — On-Chain + Off-Chain Coverage</p>
-</div>
-""", unsafe_allow_html=True)
+st.caption("Bridge Security Scanner — on-chain pattern + function-level analysis, Slither AST analysis, and off-chain relayer checks.")

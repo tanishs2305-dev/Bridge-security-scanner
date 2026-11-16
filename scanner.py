@@ -13,6 +13,8 @@ import regex as re  # drop-in replacement for 're' with a timeout guard against
 from typing import Dict, List
 from data.vulnerability_patterns import ALL_PATTERNS, SEVERITY_WEIGHTS
 from data.offchain_patterns import ALL_OFFCHAIN_PATTERNS
+from data.function_rules import FUNCTION_RULES, extract_functions
+from data.remediation import get_remediation
 
 # Hard ceiling (seconds) any single pattern is allowed to run against one
 # input. If a pathological input causes a pattern to exceed this, that match
@@ -28,6 +30,7 @@ class VulnerabilityScanner:
 
     def __init__(self):
         self.patterns = ALL_PATTERNS
+        self.use_function_rules = True  # structure-aware rules (Solidity only)
         self.findings = []
 
     def scan_contract(self, contract_code: str) -> Dict:
@@ -49,6 +52,10 @@ class VulnerabilityScanner:
         for category_name, category_patterns in self.patterns.items():
             category_findings = self._scan_category(cleaned_code, category_name, category_patterns)
             self.findings.extend(category_findings)
+
+        # Structure-aware (function-level) rules: independent of variable names
+        if self.use_function_rules:
+            self.findings.extend(self._scan_functions(cleaned_code))
 
         # Calculate risk score
         risk_score = self._calculate_risk_score()
@@ -100,11 +107,42 @@ class VulnerabilityScanner:
                         "severity": vuln_data["severity"],
                         "explanation": vuln_data["explanation"],
                         "line_number": line_number,
-                        "code_snippet": snippet
+                        "code_snippet": snippet,
+                        "remediation": get_remediation(vuln_name, "pattern"),
+                        "detector": vuln_name,
+                        "source": "pattern"
                     }
 
                     findings.append(finding)
 
+        return findings
+
+    def _scan_functions(self, code: str) -> List[Dict]:
+        """
+        Run the function-level rules from data/function_rules.py. Each rule inspects
+        a whole function body, so detection does not depend on variable names.
+        """
+        findings = []
+        for fn in extract_functions(code):
+            for rule_name, rule in FUNCTION_RULES.items():
+                offset = rule["check"](fn, code)
+                if offset is None:
+                    continue
+                abs_start = fn["start"] + offset
+                line_number = code[:abs_start].count('\n') + 1
+                snippet = self._extract_snippet(code, abs_start, abs_start + 1)
+                findings.append({
+                    "category": rule["category"].replace("_", " ").title(),
+                    "vulnerability": rule_name.replace("_", " ").title(),
+                    "description": rule["description"],
+                    "severity": rule["severity"],
+                    "explanation": rule["explanation"],
+                    "line_number": line_number,
+                    "code_snippet": snippet,
+                    "remediation": get_remediation(rule_name, "pattern"),
+                    "detector": rule_name,
+                    "source": "pattern"
+                })
         return findings
 
     def _extract_snippet(self, code: str, start: int, end: int, context_lines: int = 2) -> str:
@@ -185,6 +223,7 @@ class OffchainScanner(VulnerabilityScanner):
     def __init__(self):
         super().__init__()
         self.patterns = ALL_OFFCHAIN_PATTERNS
+        self.use_function_rules = False
 
     def scan_contract(self, contract_code: str) -> Dict:
         results = super().scan_contract(contract_code)
@@ -203,6 +242,19 @@ class OffchainScanner(VulnerabilityScanner):
         code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
         return code
 
+# Slither check names that describe the same bug as one of our own detectors
+SLITHER_TO_PATTERN_DETECTOR = {
+    "reentrancy-eth": "reentrancy",
+    "reentrancy-no-eth": "reentrancy",
+    "reentrancy-benign": "reentrancy",
+    "reentrancy-events": "reentrancy",
+    "tx-origin": "tx_origin_auth",
+    "weak-prng": "weak_randomness",
+    "suicidal": "unprotected_privileged_function",
+    "controlled-delegatecall": "controlled_delegatecall",
+}
+
+
 def merge_scan_results(regex_results: Dict, slither_results: Dict) -> Dict:
     """
     Combine findings from the regex-based scanner and Slither into one
@@ -216,9 +268,20 @@ def merge_scan_results(regex_results: Dict, slither_results: Dict) -> Dict:
         f.setdefault("source", "pattern")
         combined_findings.append(f)
 
+    # A bug found by BOTH engines is one bug, not two: mark the pattern finding as
+    # "confirmed by Slither" instead of adding (and scoring) the Slither duplicate.
     for f in slither_results.get("vulnerabilities", []):
         f = dict(f)
         f.setdefault("source", "slither")
+        mapped = SLITHER_TO_PATTERN_DETECTOR.get(f.get("detector", ""))
+        twin = next(
+            (c for c in combined_findings
+             if c.get("source") == "pattern" and c.get("detector") == mapped),
+            None,
+        ) if mapped else None
+        if twin is not None:
+            twin["confirmed_by"] = "slither"
+            continue
         combined_findings.append(f)
 
     severity_weights = {"CRITICAL": 10, "HIGH": 7, "MEDIUM": 4, "LOW": 2}
@@ -305,6 +368,8 @@ def format_report(scan_results: Dict) -> str:
             report.append(f"    Line: {vuln['line_number']}")
             report.append(f"    Description: {vuln['description']}")
             report.append(f"    Explanation: {vuln['explanation']}")
+            if vuln.get('remediation'):
+                report.append(f"    Remediation: {vuln['remediation']}")
             report.append(f"    Code:")
             for line in vuln['code_snippet'].split('\n'):
                 report.append(f"        {line}")
@@ -349,7 +414,7 @@ if __name__ == "__main__":
     print("TEST 2: Off-Chain Relayer (Python)")
     print("-" * 70)
     relayer_code = """
-    private_key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+    private_key = "0x1111111111111111111111111111111111111111111111111111111111111111"
 
     def relay_withdrawal(data):
         signatures = data["signatures"]
